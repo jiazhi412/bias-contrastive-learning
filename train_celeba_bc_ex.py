@@ -9,9 +9,9 @@ import numpy as np
 import torch
 from torch import nn
 
-from debias.datasets.celeba import get_celeba
+from debias.datasets.celeba import get_celeba, get_celeba_ex
 from debias.losses.bias_contrastive import BiasContrastiveLoss
-from debias.networks.resnet import FCResNet18
+from debias.networks.resnet import FCResNet18_feat
 from debias.utils.logging import set_logging
 from debias.utils.utils import (AverageMeter, MultiDimAverageMeter, accuracy,
                                 save_model, set_seed, pretty_dict)
@@ -22,17 +22,20 @@ def parse_option():
     parser.add_argument('--exp_name', type=str, default='test')
     parser.add_argument('--gpu', type=int, default=0)
     parser.add_argument('--task', type=str, default='makeup')
+    parser.add_argument("--eval_mode", type=str, default='unbiased')
 
     parser.add_argument('--epochs', type=int, default=40)
     parser.add_argument('--seed', type=int, default=1)
 
-    parser.add_argument('--bs', type=int, default=128, help='batch_size')
+    parser.add_argument('--bs', type=int, default=32, help='batch_size')
+    # parser.add_argument('--bs', type=int, default=64, help='batch_size')
     parser.add_argument('--cbs', type=int, default=64, help='batch_size of dataloader for contrastive loss')
-    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--lr', type=float, default=2e-5)
 
     # hyperparameters
     parser.add_argument('--weight', type=float, default=0.01)
     parser.add_argument('--ratio', type=int, default=10)
+    # parser.add_argument('--ratio', type=int, default=0)
     parser.add_argument('--aug', type=int, default=1)
     parser.add_argument('--bb', type=int, default=0)
 
@@ -43,7 +46,7 @@ def parse_option():
 
 
 def set_model(train_loader, opt):
-    model = FCResNet18().cuda()
+    model = FCResNet18_feat().cuda()
     criterion = BiasContrastiveLoss(
         confusion_matrix=train_loader.dataset.confusion_matrix,
         bb=opt.bb)
@@ -73,12 +76,19 @@ def train(train_loader, cont_train_loader, model, criterion, optimizer, epoch, o
 
         images = images.cuda()
         # print(images.size())
-        logits, _ = model(images)
+        logits, _, _ = model(images)
+        preds = logits.data.max(1, keepdim=True)[1].squeeze(1)
+
+        # print(logits)
+        # print(preds)
+        # print(labels)
+        # print(biases)
+        # print('kljerl')
 
         total_images = torch.cat([cont_images[0], cont_images[1]], dim=0)
         total_images, cont_labels, cont_biases = total_images.cuda(), cont_labels.cuda(), cont_biases.cuda()
         # print(total_images.size())
-        _, cont_features = model(total_images)
+        _, cont_features, _ = model(total_images)
 
         f1, f2 = torch.split(cont_features, [cont_bsz, cont_bsz], dim=0)
         cont_features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
@@ -98,26 +108,73 @@ def train(train_loader, cont_train_loader, model, criterion, optimizer, epoch, o
     return avg_ce_loss.avg, avg_con_loss.avg, avg_loss.avg
 
 
-def validate(val_loader, model):
+def validate(val_loader, model, opt=None, is_test=False):
     model.eval()
 
     top1 = AverageMeter()
     attrwise_acc_meter = MultiDimAverageMeter(dims=(2, 2))
-
+    output_list = []
+    feature_list = []
+    target_list = []
+    a_list = []
     with torch.no_grad():
         for idx, (images, labels, biases, _) in enumerate(val_loader):
             images, labels, biases = images.cuda(), labels.cuda(), biases.cuda()
             bsz = labels.shape[0]
 
-            output, _ = model(images)
+            output, _, feature = model(images)
             preds = output.data.max(1, keepdim=True)[1].squeeze(1)
+
+            # print(output)
+            # print(preds)
+            # print(labels)
+            # print(biases)
+            # print('dajldjas')
 
             acc1, = accuracy(output, labels, topk=(1,))
             top1.update(acc1[0], bsz)
 
             corrects = (preds == labels).long()
             attrwise_acc_meter.add(corrects.cpu(), torch.stack([labels.cpu(), biases.cpu()], dim=1))
-
+            feature_list.append(feature)
+            output_list.append(preds)
+            target_list.append(labels)
+            a_list.append(biases)
+    
+    import utils
+    feature, output, a, target = torch.cat(feature_list), torch.cat(output_list), torch.cat(a_list), torch.cat(target_list)
+    # print(feature.size())
+    # print(output.size())
+    # print(a.size())
+    # print(target.size())
+    output = output.unsqueeze(1)
+    a = a.unsqueeze(1)
+    target = target.unsqueeze(1)
+    if is_test:
+        if opt.task == "blonde":
+            attrs = ['Blond_Hair']
+        elif opt.task == "makeup":
+            attrs = ['Heavy_Makeup']
+        mi_RA = utils.estimate_MI(feature, a)
+        mi_YpA = utils.compute_MI_withlogits(output, a)
+        mi_YpY = utils.compute_MI_withlogits(output, target)
+        mi_YA = utils.compute_MI_withlogits(output, a)
+        # print(mi_RA)
+        # print(mi_YpA)
+        # print(mi_YpY)
+        # print(mi_YA)
+        data = {
+            'Time': [datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")],
+            'Attr': [attrs[0]],
+            'Eval Mode': [opt.eval_mode],
+            'Test Acc': [top1.avg.item()],
+            'I(R,A)': [mi_RA],
+            'I(Y\',A)': [mi_YpA],
+            'I(Y\',Y)': [mi_YpY],
+            'I(Y,A)': [mi_YA],
+            }
+        utils.mkdir(f'exp_results/{opt.exp_name}')
+        utils.append_data_to_csv(data, os.path.join('exp_results', opt.exp_name, 'CelebA_BCL_trials.csv'))
     return top1.avg, attrwise_acc_meter.get_mean()
 
 
@@ -127,14 +184,16 @@ def main():
     if opt.task == "makeup":
         opt.epochs = 40
         opt.ratio = 50
+        # opt.ratio = 0
     elif opt.task == "blonde":
         opt.epochs = 10
         opt.ratio = 30
+        # opt.ratio = 0
     else:
         raise AttributeError()
 
-    exp_name = f'bc-bb{opt.bb}-celeba_{opt.task}-{opt.exp_name}-lr{opt.lr}-bs{opt.bs}-cbs{opt.cbs}-w{opt.weight}-ratio{opt.ratio}-aug{opt.aug}-seed{opt.seed}'
-    opt.exp_name = exp_name
+    exp_name = f'bc-bb{opt.bb}-celeba_{opt.task}-{opt.exp_name}-lr{opt.lr}-bs{opt.bs}-cbs{opt.cbs}-w{opt.weight}-ratio{opt.ratio}-aug{opt.aug}-seed{opt.seed}-{opt.task}-{opt.eval_mode}'
+    # opt.exp_name = exp_name
 
     output_dir = f'exp_results/{exp_name}'
     save_path = Path(output_dir)
@@ -152,14 +211,15 @@ def main():
     # root = '/nas/vista-ssd01/users/jiazli/datasets/CelebA/raw_data/img_align_celeba'
     root = '/nas/vista-ssd01/users/jiazli/datasets/CelebA/'
 
-    train_loader = get_celeba(
+    train_loader = get_celeba_ex(
         root,
         batch_size=opt.bs,
         target_attr=opt.task,
         split='train',
-        aug=False, )
+        aug=False,
+        eval_mode=opt.eval_mode)
 
-    cont_train_loader = get_celeba(
+    cont_train_loader = get_celeba_ex(
         root,
         batch_size=opt.cbs,
         target_attr=opt.task,
@@ -167,22 +227,25 @@ def main():
         aug=opt.aug,
         two_crop=True,
         ratio=opt.ratio,
-        given_y=True)
+        given_y=True,
+        eval_mode=opt.eval_mode)
 
     val_loaders = {}
-    val_loaders['valid'] = get_celeba(
+    val_loaders['valid'] = get_celeba_ex(
         root,
         batch_size=256,
         target_attr=opt.task,
         split='train_valid',
-        aug=False)
+        aug=False,
+        eval_mode=opt.eval_mode)
 
-    val_loaders['test'] = get_celeba(
+    val_loaders['test'] = get_celeba_ex(
         root,
         batch_size=256,
         target_attr=opt.task,
         split='valid',
-        aug=False)
+        aug=False,
+        eval_mode=opt.eval_mode)
 
     model, criterion = set_model(train_loader, opt)
 
@@ -225,8 +288,12 @@ def main():
 
                 save_file = save_path / 'checkpoints' / f'best_{tag}.pth'
                 save_model(model, optimizer, opt, epoch, save_file)
-            logging.info(
-                f'[{epoch} / {opt.epochs}] best {tag} accuracy: {best_accs[tag]:.3f} at epoch {best_epochs[tag]} \n best_stats: {best_stats[tag]}')
+            print(best_accs)
+            logging.info(f'[{epoch} / {opt.epochs}] best {tag} accuracy: {best_accs[tag]:.3f} at epoch {best_epochs[tag]} \n best_stats: {best_stats[tag]}')
+
+    test_loader = val_loaders['test']
+    accs, valid_attrwise_accs = validate(test_loader, model, opt=opt, is_test=True)
+    # print(accs)
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))

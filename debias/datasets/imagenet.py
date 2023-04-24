@@ -166,7 +166,7 @@ class ImageFolder(torch.utils.data.Dataset):
         return len(self.dataset)
 
 
-def get_imagenet(root, batch_size, bias_feature_root='./biased_feats', train=True, num_workers=8, seed=1,
+def get_imagenet(root, batch_size, bias_feature_root='./biased_feats', train=True, num_workers=4, seed=1,
                  load_size=256, image_size=224, val_data='ImageNet', aug=False, two_crop=False, ratio=0,
                  load_bias_feature=False, cluster_root=None, cluster_name='cluster'):
     if train:

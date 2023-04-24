@@ -222,7 +222,7 @@ class ColourBiasedMNIST(BiasedMNIST):
 
 
 def get_color_mnist(root, batch_size, data_label_correlation,
-                    n_confusing_labels=9, split='train', num_workers=8, seed=1, aug=True,
+                    n_confusing_labels=9, split='train', num_workers=4, seed=1, aug=True,
                     two_crop=False, ratio=0, bias_feature_root='./biased_feats', load_bias_feature=False, given_y=True, train_corr=None):
     logging.info(f'get_color_mnist - split: {split}, aug: {aug}, given_y: {given_y}, ratio: {ratio}')
     normalize = transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))

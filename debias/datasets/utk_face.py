@@ -162,7 +162,7 @@ class BiasedUTKFace:
         return len(self.files)
 
 
-def get_utk_face(root, batch_size, split, bias_attr='race', bias_rate=0.9, num_workers=8,
+def get_utk_face(root, batch_size, split, bias_attr='race', bias_rate=0.9, num_workers=4,
                   aug=False, image_size=64, two_crop=False, ratio=0, given_y=True):
     logging.info(f'get_utk_face - split: {split}, aug: {aug}, given_y: {given_y}, ratio: {ratio}')
     size_dict = {64: 72, 128: 144, 224: 256}
