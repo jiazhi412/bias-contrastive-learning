@@ -7,15 +7,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch import nn
 
 from debias.datasets.celeba import get_celeba, get_celeba_ex
-from debias.losses.bias_contrastive import BiasContrastiveLoss
-from debias.networks.resnet import FCResNet18_feat
+from debias.losses.end_org import EnDLoss
+from debias.networks.resnet import FCResNet18, FCResNet18_feat
 from debias.utils.logging import set_logging
 from debias.utils.utils import (AverageMeter, MultiDimAverageMeter, accuracy,
-                                save_model, set_seed, pretty_dict)
+                                pretty_dict, save_model, set_seed)
 import utils
-
 
 def parse_option():
     parser = argparse.ArgumentParser()
@@ -30,15 +30,13 @@ def parse_option():
     parser.add_argument('--epochs', type=int, default=40)
     parser.add_argument('--seed', type=int, default=1)
 
-    parser.add_argument('--bs', type=int, default=32, help='batch_size')
-    parser.add_argument('--cbs', type=int, default=64, help='batch_size of dataloader for contrastive loss')
-    parser.add_argument('--lr', type=float, default=1e-6)
+    parser.add_argument('--bs', type=int, default=128, help='batch_size')
+    parser.add_argument('--lr', type=float, default=1e-3)
 
     # hyperparameters
-    parser.add_argument('--weight', type=float, default=0.01)
-    parser.add_argument('--ratio', type=int, default=10)
-    parser.add_argument('--aug', type=int, default=1)
-    parser.add_argument('--bb', type=int, default=1)
+    parser.add_argument('--alpha', type=float, default=1.)
+    parser.add_argument('--beta', type=float, default=1.)
+    # parser.add_argument('--bb', type=int, default=0)
 
     opt = parser.parse_args()
     # os.environ['CUDA_VISIBLE_DEVICES'] = str(opt.gpu)
@@ -46,60 +44,39 @@ def parse_option():
     return opt
 
 
-def set_model(train_loader, opt):
+def set_model(opt):
     model = FCResNet18_feat().cuda()
-    criterion = BiasContrastiveLoss(
-        confusion_matrix=train_loader.dataset.confusion_matrix,
-        bb=opt.bb)
+    criterion = EnDLoss(alpha=opt.alpha, beta=opt.beta)
     return model, criterion
 
 
-def train(train_loader, cont_train_loader, model, criterion, optimizer, epoch, opt):
+def train(train_loader, model, criterion, optimizer):
     model.train()
     avg_ce_loss = AverageMeter()
-    avg_con_loss = AverageMeter()
+    avg_end_loss = AverageMeter()
     avg_loss = AverageMeter()
 
     train_iter = iter(train_loader)
-    cont_train_iter = iter(cont_train_loader)
+    total_steps = len(train_iter)
     for idx, (images, labels, biases, _) in enumerate(train_iter):
-        try:
-            cont_images, cont_labels, cont_biases, _ = next(cont_train_iter)
-        except:
-            cont_train_iter = iter(cont_train_loader)
-            cont_images, cont_labels, cont_biases, _ = next(cont_train_iter)
 
         bsz = labels.shape[0]
-        cont_bsz = cont_labels.shape[0]
-
         labels, biases = labels.cuda(), biases.cuda()
-
         images = images.cuda()
-        # print(images.size())
-        logits, _, _ = model(images)
-        preds = logits.data.max(1, keepdim=True)[1].squeeze(1)
 
-        total_images = torch.cat([cont_images[0], cont_images[1]], dim=0)
-        total_images, cont_labels, cont_biases = total_images.cuda(), cont_labels.cuda(), cont_biases.cuda()
-        # print(total_images.size())
-        _, cont_features, _ = model(total_images)
-
-        f1, f2 = torch.split(cont_features, [cont_bsz, cont_bsz], dim=0)
-        cont_features = torch.cat([f1.unsqueeze(1), f2.unsqueeze(1)], dim=1)
-
-        ce_loss, con_loss = criterion(logits, labels, biases, cont_features, cont_labels, cont_biases)
-
-        loss = ce_loss * opt.weight + con_loss
-
+        logits, feats, out = model(images)
+        ce_loss, end_loss = criterion(logits, labels, biases, feats)
+        loss = ce_loss + end_loss
+        avg_loss.update(loss.item(), bsz)
         avg_ce_loss.update(ce_loss.item(), bsz)
-        avg_con_loss.update(con_loss.item(), bsz)
+        avg_end_loss.update(end_loss.item(), bsz)
         avg_loss.update(loss.item(), bsz)
 
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-    return avg_ce_loss.avg, avg_con_loss.avg, avg_loss.avg
+    return avg_ce_loss.avg, avg_end_loss.avg, avg_loss.avg
 
 
 def validate(val_loader, model, opt=None, is_test=False, ce=0, train_or_test='train', results=None):
@@ -128,7 +105,7 @@ def validate(val_loader, model, opt=None, is_test=False, ce=0, train_or_test='tr
             output_list.append(preds)
             target_list.append(labels)
             a_list.append(biases)
-    
+
     feature, output, a, target = torch.cat(feature_list), torch.cat(output_list), torch.cat(a_list), torch.cat(target_list)
     output = output.unsqueeze(1)
     a = a.unsqueeze(1)
@@ -159,7 +136,7 @@ def validate(val_loader, model, opt=None, is_test=False, ce=0, train_or_test='tr
                 }
         else:
             results['Test Acc'] = [top1.avg.item()]
-            utils.append_data_to_csv(results, os.path.join('exp_results', 'BCL', opt.exp_name, 'CelebA_BCL_trials.csv'))
+            utils.append_data_to_csv(results, os.path.join('exp_results', 'EnD', opt.exp_name, 'CelebA_EnD_trials.csv'))
     return top1.avg, attrwise_acc_meter.get_mean(), results
 
 
@@ -167,38 +144,31 @@ def main():
     opt = parse_option()
     
     if opt.task == "makeup":
-        # opt.epochs = 40
         # opt.epochs = 1
         opt.epochs = 26
-        opt.ratio = 50
-        # opt.ratio = 0
     elif opt.task == "blonde":
         # opt.epochs = 1
         opt.epochs = 10
-        opt.ratio = 30
-        # opt.ratio = 0
     else:
         raise AttributeError()
 
-    # exp_name = f'bc-bb{opt.bb}-celeba_{opt.task}-{opt.exp_name}-lr{opt.lr}-bs{opt.bs}-cbs{opt.cbs}-w{opt.weight}-ratio{opt.ratio}-aug{opt.aug}-seed{opt.seed}-{opt.task}-{opt.eval_mode}'
-    exp_name = f'bb{opt.bb}-lr{opt.lr}-bs{opt.bs}-cbs{opt.cbs}-w{opt.weight}-ratio{opt.ratio}-aug{opt.aug}-seed{opt.seed}'
+    # exp_name = f'end-celeba_{opt.task}-{opt.exp_name}-lr{opt.lr}-bs{opt.bs}-alpha{opt.alpha}-beta{opt.beta}-seed{opt.seed}'
+    exp_name = f'end-lr{opt.lr}-bs{opt.bs}-alpha{opt.alpha}-beta{opt.beta}-seed{opt.seed}'
     # opt.exp_name = exp_name
 
     # output_dir = f'exp_results/{exp_name}'
-    output_dir = f'exp_results/BCL/{opt.exp_name}/{opt.task}/{opt.eval_mode}/{exp_name}'
+    output_dir = f'exp_results/EnD/{opt.exp_name}/{opt.task}/{opt.eval_mode}/{exp_name}'
     save_path = Path(output_dir)
     save_path.mkdir(parents=True, exist_ok=True)
 
     set_logging(exp_name, 'INFO', str(save_path))
     logging.info(f'Set seed: {opt.seed}')
-    # set_seed(opt.seed)
+    set_seed(opt.seed)
     logging.info(f'save_path: {save_path}')
 
     np.set_printoptions(precision=3)
     torch.set_printoptions(precision=3)
 
-    # root = './data/celeba'
-    # root = '/nas/vista-ssd01/users/jiazli/datasets/CelebA/raw_data/img_align_celeba'
     root = '/nas/vista-ssd01/users/jiazli/datasets/CelebA/'
 
     train_loader, ce = get_celeba_ex(
@@ -207,20 +177,6 @@ def main():
         target_attr=opt.task,
         split='train',
         aug=False,
-        eval_mode=opt.eval_mode,
-        n_bc=opt.n_bc,
-        p_bc=opt.p_bc,
-        balance=opt.balance)
-
-    cont_train_loader, _ = get_celeba_ex(
-        root,
-        batch_size=opt.cbs,
-        target_attr=opt.task,
-        split='train',
-        aug=opt.aug,
-        two_crop=True,
-        ratio=opt.ratio,
-        given_y=True,
         eval_mode=opt.eval_mode,
         n_bc=opt.n_bc,
         p_bc=opt.p_bc,
@@ -243,7 +199,7 @@ def main():
         aug=False,
         eval_mode=opt.eval_mode)
 
-    model, criterion = set_model(train_loader, opt)
+    model, criterion = set_model(opt)
 
     decay_epochs = [opt.epochs // 3, opt.epochs * 2 // 3]
 
@@ -258,9 +214,9 @@ def main():
     best_stats = {}
     start_time = time.time()
     for epoch in range(1, opt.epochs + 1):
-        logging.info(f'[{epoch} / {opt.epochs}] Learning rate: {scheduler.get_last_lr()[0]} weight: {opt.weight}')
-        ce_loss, con_loss, loss = train(train_loader, cont_train_loader, model, criterion, optimizer, epoch, opt)
-        logging.info(f'[{epoch} / {opt.epochs}] Loss: {loss} CE Loss: {ce_loss} Con Loss: {con_loss}')
+        logging.info(f'[{epoch} / {opt.epochs}] Learning rate: {scheduler.get_last_lr()[0]}')
+        ce_loss, end_loss, loss = train(train_loader, model, criterion, optimizer)
+        logging.info(f'[{epoch} / {opt.epochs}] Loss: {loss} CE Loss: {ce_loss} EnD Loss: {end_loss}')
 
         scheduler.step()
 
@@ -284,7 +240,6 @@ def main():
 
                 save_file = save_path / 'checkpoints' / f'best_{tag}.pth'
                 save_model(model, optimizer, opt, epoch, save_file)
-            print(best_accs)
             logging.info(f'[{epoch} / {opt.epochs}] best {tag} accuracy: {best_accs[tag]:.3f} at epoch {best_epochs[tag]} \n best_stats: {best_stats[tag]}')
 
     _, _, results = validate(train_loader, model, opt=opt, is_test=True, ce=ce, train_or_test='train')

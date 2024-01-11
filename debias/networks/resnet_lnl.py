@@ -25,6 +25,28 @@ class LNLResNet18(nn.Module):
         return logits, bias_feat
 
 
+class LNLResNet18_feat(nn.Module):
+    def __init__(self, num_classes=2, pretrained=True):
+        super().__init__()
+        model = resnet18(pretrained=pretrained)
+        bias_modules = list(model.children())[0:6]
+        self.bias_feat_extractor = nn.Sequential(*bias_modules)
+        feat_modules = list(model.children())[6:9]
+        self.feat_extractor = nn.Sequential(*feat_modules)
+
+        self.embed_size = 512
+        self.num_classes = num_classes
+        self.fc = nn.Linear(self.embed_size, num_classes)
+        print(f'LNLResNet18 - num_classes: {num_classes} pretrained: {pretrained}')
+
+    def forward(self, x):
+        bias_feat = self.bias_feat_extractor(x)
+        out = self.feat_extractor(bias_feat)
+        out = out.squeeze(-1).squeeze(-1)
+        logits = self.fc(out)
+        return logits, bias_feat, out
+
+
 class LNLBiasPredictor(nn.Module):
     def __init__(self, num_classes=2):
         super().__init__()

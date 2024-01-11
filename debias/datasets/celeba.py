@@ -177,7 +177,7 @@ def get_celeba(root, batch_size, target_attr='blonde', split='train', num_worker
 
 
 def get_celeba_ex(root, batch_size, target_attr='blonde', split='train', num_workers=4, aug=True, two_crop=False, ratio=0,
-               img_size=224, given_y=True, eval_mode='unbiased'):
+               img_size=224, given_y=True, eval_mode='unbiased', n_bc=-1, p_bc=-1, balance=False):
     logging.info(f'get_celeba - split:{split}, aug: {aug}, given_y: {given_y}, ratio: {ratio}')
     if 'valid' in split:
         transform = T.Compose(
@@ -239,17 +239,11 @@ def get_celeba_ex(root, batch_size, target_attr='blonde', split='train', num_wor
     target_dict = utils.transfer_origin_for_testing_only(target_dict, attribute_list)
 
     # modify dev and test to unbiased and bias conflict 
-    train_key_list = utils.CelebA_eval_mode(train_key_list, target_dict, sex_dict, mode = eval_mode, train_or_test='train')
+    train_key_list = utils.CelebA_eval_mode(train_key_list, target_dict, sex_dict, mode = eval_mode, train_or_test='train', n_bc=n_bc, p_bc=p_bc, balance=balance)
+    ce = utils.conditional_entropy(train_key_list, target_dict, sex_dict)
     dev_key_list = utils.CelebA_eval_mode(dev_key_list, target_dict, sex_dict, mode = eval_mode, train_or_test='dev')
     test_key_list = utils.CelebA_eval_mode(test_key_list, target_dict, sex_dict, mode = eval_mode, train_or_test='test')
 
-    # import torchvision.transforms as transforms
-    # transform_train = transforms.Compose([
-    #                                     transforms.CenterCrop(148),
-    #                                     transforms.Resize((224,224)),
-    #                                     transforms.ToTensor(),
-    #                                     # normalize,
-    #                                     ])
     if split == 'train':
         dataset = CelebADataset(train_key_list, image_feature, target_dict, sex_dict, transform)
     elif split == 'train_valid':
@@ -281,4 +275,4 @@ def get_celeba_ex(root, batch_size, target_attr='blonde', split='train', num_wor
         pin_memory=True,
         drop_last=two_crop
     )
-    return dataloader
+    return dataloader, ce

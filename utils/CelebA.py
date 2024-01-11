@@ -43,7 +43,7 @@ def sub_accuracy_by_attr(outputs, targets, pa):
     acc_nn = utils.compute_Acc_withlogits_binary(torch.cat(outputs_nn), torch.cat(targets_nn))
     print(f'Accuracy pp = {acc_pp}, pn = {acc_pn}, np = {acc_np}, nn = {acc_nn}')
 
-def CelebA_eval_mode(key_list, target_dict, sex_dict, mode, train_or_test):
+def CelebA_eval_mode(key_list, target_dict, sex_dict, mode, train_or_test, n_bc=-1, p_bc=-1, balance=False):
     pp, pn, np, nn = split_by_attr(key_list, target_dict, sex_dict)
     print(f'[{mode}] {train_or_test}: (Male-BlondHair) pp = {len(pp)}, pn = {len(pn)}, np = {len(np)}, nn = {len(nn)}')
     m = min(len(pp), len(pn), len(np), len(nn))
@@ -55,13 +55,41 @@ def CelebA_eval_mode(key_list, target_dict, sex_dict, mode, train_or_test):
         elif mode.startswith('conflict_pp'):
             r_key_list = pp
     elif train_or_test == 'train':
-        if mode == 'unbiased_ex' or mode == 'conflict_ex' or mode == 'conflict_pp_ex':
-            r_key_list = pn + np
+        if n_bc != -1:
+            r_key_list = pn + np + pp[:n_bc//2] + nn[:n_bc//2]
+        elif p_bc != -1:
+            if balance:
+                r_key_list = pn + np + pp[:int(m*p_bc)] + nn[:int(m*p_bc)]
+            else:
+                r_key_list = pn + np + pp[:int(len(pp)*p_bc)] + nn[:int(len(nn)*p_bc)]
         else:
-            r_key_list = key_list
+            if mode == 'unbiased_ex' or mode == 'conflict_ex' or mode == 'conflict_pp_ex':
+                r_key_list = pn + np
+            else:
+                r_key_list = key_list
     pp, pn, np, nn = split_by_attr(r_key_list, target_dict, sex_dict)
     print(f'[{mode}] {train_or_test}: (Male-BlondHair) pp = {len(pp)}, pn = {len(pn)}, np = {len(np)}, nn = {len(nn)}')
     return r_key_list
+
+def conditional_entropy(r_key_list, target_dict, sex_dict):
+    pp, pn, np, nn = split_by_attr(r_key_list, target_dict, sex_dict)
+    pp, pn, np, nn = len(pp), len(pn), len(np), len(nn) 
+    py = pp + pn
+    ny = np + nn
+    ap = np + pp
+    an = nn + pn
+    n = py + ny
+    Pya = torch.tensor([[pp, pn], [np, nn]]) / n
+    Pyca = torch.stack([torch.tensor([pp, pn]) / py, torch.tensor([np, nn]) / ny], dim=0)
+    tmp = torch.log(Pyca)
+    res = -(Pya * torch.log(Pyca)).sum()
+    res = torch.nan_to_num(res)
+    # print(Pya)
+    # print(Pyca)
+    # print(tmp)
+    # print(res)
+    print(f'H(Y|A)={res}')
+    return res.item()
 
 def reverse_sex(b, sex_idx):
     a = b.clone()
